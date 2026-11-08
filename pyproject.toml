@@ -1,0 +1,38 @@
+[project]
+name = "moire-mpnqs"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "jax==0.11.1",
+    "flax==0.12.10",
+    "netket @ git+https://github.com/netket/netket@5e4511b78",
+    "optax",
+    "numpy",
+    "scipy",
+    "pandas",
+    "matplotlib",
+]
+
+[dependency-groups]
+dev = ["ipykernel", "pytest", "ruff"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/moire_mpnqs"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["slow: builds a NetKet MCState and samples (~1 min)"]
+
+[tool.ruff]
+line-length = 110
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B"]
+ignore = ["E731", "E741"]

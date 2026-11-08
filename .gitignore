@@ -1,0 +1,21 @@
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.pytest_cache/
+.ruff_cache/
+.DS_Store
+
+# outputs
+runs/
+*_runs/
+data/
+*.mpack
+*.log
+*.pkl
+
+# personal
+scratch/
+.vscode/*
+!.vscode/launch.json
+!.vscode/settings.json
