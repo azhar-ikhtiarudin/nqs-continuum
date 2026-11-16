@@ -7,7 +7,7 @@ import numpy as np
 from flax import nnx
 from jax.nn.initializers import lecun_normal
 
-from moire_mpnqs.physics import Lattice, RefOrbitals, harmonics, periodic_dist_square
+from moire_mpnqs.physics import Lattice, RefOrbitals, harmonics, periodic_dist_square, ferminet_periodic_dist
 
 class MLP(nnx.Module):
     def __init__(
@@ -189,12 +189,14 @@ def kato_cusp(units, interaction: str):
 
 class Jastrow(nnx.Module):
     def __init__(self, lattice: Lattice, n_up: int, n_dn: int, ydim: int, cusp, *, 
-                kind: str = "cusp_nn", b0: float = 0.1, hidden: int = 32, rngs: nnx.Rngs):
+                kind: str = "cusp_nn", alpha0: float = 0.1, hidden: int = 32, rngs: nnx.Rngs):
         self.kind = kind
         self.n_up, self.N = n_up, n_up + n_dn
         self.c = jnp.asarray(cusp, dtype=jnp.float64)                       # (anti, parallel), fixed
-        inv_softplus = float(np.log(np.expm1(b0)))
-        self.b_raw = nnx.Param(jnp.full((2,), inv_softplus))                 # (anti, parallel)
+        if alpha0 is None:
+            alpha0 = 1.0 / float(cusp[0]) if float(cusp[0]) > 0 else 1.0
+        self.alpha = nnx.Param(jnp.full((2,), float(alpha0)))               # (anti, parallel)
+        self.supercell = jnp.asarray(lattice.supercell)
         self.G12 = jnp.asarray(lattice.G12)
         self.Gs = jnp.asarray(lattice.G)
         if kind == "cusp_nn":
@@ -202,21 +204,21 @@ class Jastrow(nnx.Module):
                         activation=nnx.tanh, last_init=nnx.initializers.zeros)
             self.v = MLP(in_dim=ydim, out_dim=1, hidden_layers=(hidden,), rngs=rngs,
                         activation=nnx.tanh, last_init=nnx.initializers.zeros)
+        elif kind != "cusp":
+            raise ValueError(f"unknown jastrow kind {kind!r}")
 
     def __call__(self, r, y=None):
         N = self.N
         s = jnp.concatenate((jnp.ones(self.n_up), -jnp.ones(N - self.n_up)))
         same = (s[:, None] * s[None, :]) > 0                                 # (N, N)
         iu = np.triu_indices(N, k=1)
-        rij = r[:, :, None, :] - r[:, None, :, :]
-        d2 = periodic_dist_square(rij, self.Gs)
-        d = jnp.sqrt(d2 + 1e-24)[:, iu[0], iu[1]]                           # (B, P)
+        rp = r[:, iu[0], :] - r[:, iu[1], :]                                 # (B, P, 2), i < j
+        d = ferminet_periodic_dist(rp, self.supercell)                       # (B, P)
         par = same[iu]
         c = jnp.where(par, self.c[1], self.c[0])
-        b = jnp.where(par, jax.nn.softplus(self.b_raw[...][1]), jax.nn.softplus(self.b_raw[...][0]))
-        logJ = jnp.sum(c * d / (1.0 + d / b), axis=-1)
+        alpha = jnp.where(par, self.alpha[...][1], self.alpha[...][0])
+        logJ = jnp.sum(-(c * alpha**2) / (alpha + d), axis=-1)
         if self.kind == "cusp_nn":
-            rp = rij[:, iu[0], iu[1]]                                        # (B, P, 2)
             ss = jnp.broadcast_to(jnp.where(par, 1.0, -1.0), d.shape)[..., None]
             feats = jnp.concatenate((jnp.cos(rp @ self.G12.T), jnp.cos(rp @ self.Gs.T), d[..., None], ss), -1)
             logJ = logJ + jnp.sum(self.w(feats)[..., 0], axis=-1)
@@ -310,7 +312,7 @@ class MPNQS(nnx.Module):
         activation: str = "gelu",
         jastrow: str = "none",
         jastrow_cusp: tuple | None = None,
-        jastrow_b0: float = 0.1,
+        jastrow_alpha0: float | None = None,
         mpnn_kwargs: dict | None = None,
     ):
         n_up, n_dn = n_per_spin 
@@ -352,7 +354,7 @@ class MPNQS(nnx.Module):
         self.jastrow_kind = jastrow
         if jastrow != "none":
             cusp = jastrow_cusp if jastrow_cusp is not None else (0.0, 0.0)
-            self.jastrow = Jastrow(lat, n_up, n_dn, y_dim, cusp, kind=jastrow, b0=jastrow_b0, rngs=rngs)
+            self.jastrow = Jastrow(lat, n_up, n_dn, y_dim, cusp, kind=jastrow, alpha0=jastrow_alpha0, rngs=rngs)
 
     def __call__(self, x):
         batch_shape = x.shape[:-1]

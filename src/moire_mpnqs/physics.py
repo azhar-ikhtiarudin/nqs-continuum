@@ -79,6 +79,19 @@ def periodic_dist_square(r, Gs):
     G_square = jnp.sum(Gs**2, axis=-1)
     return (4.0/3.0) * jnp.sum((1-jnp.cos(r@Gs.T)) / G_square, axis=-1)
 
+def ferminet_periodic_dist(r, supercell):
+    """Smooth periodic distance of FermiNet `jastrows.make_periodic_r_ee` (google-deepmind/ferminet).
+
+    With fractional coordinates s = r L^{-1} (rows of L = supercell vectors) and metric M = L L^T:
+        d = (1/2pi) sqrt( a^T M a + b^T M b ),  a = 1 - cos(2 pi s),  b = sin(2 pi s),
+    which equals |r| for small r and is periodic in the supercell."""
+    L = jnp.asarray(supercell)
+    s = r @ jnp.linalg.inv(L)
+    a, b = 1 - jnp.cos(2 * jnp.pi * s), jnp.sin(2 * jnp.pi * s)
+    M = L @ L.T
+    q = jnp.einsum("...m,mn,...n->...", a, M, a) + jnp.einsum("...m,mn,...n->...", b, M, b)
+    return jnp.sqrt(q) / (2 * jnp.pi)
+
 def harmonics(r, Gs):
     ph = r @ Gs.T
     # [sin(G1 . r), ..., sin(Gk . r), cos(G1 . r), ..., cos(Gk . r)]
