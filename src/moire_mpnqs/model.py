@@ -188,43 +188,60 @@ def kato_cusp(units, interaction: str):
     return (float(c), float(c / 3.0))
 
 class Jastrow(nnx.Module):
-    def __init__(self, lattice: Lattice, n_up: int, n_dn: int, ydim: int, cusp, *, 
-                kind: str = "cusp_nn", alpha0: float = 0.1, hidden: int = 32, rngs: nnx.Rngs):
+    def __init__(self, lattice: Lattice, n_up: int, n_down: int, y_dim: int, cusp_c=None, *,
+                kind: str = "cusp", alpha0: float = 0.1, hidden: int = 32, rngs:nnx.Rngs):
+        self.lattice = lattice
+        self.n_up = n_up
+        self.n_down = n_down
+        self.N = n_up + n_down
+        self.y_dim = y_dim
+        self.cusp_c = jnp.asarray(cusp_c, dtype=float) # antiparallel, parallel
         self.kind = kind
-        self.n_up, self.N = n_up, n_up + n_dn
-        self.c = jnp.asarray(cusp, dtype=jnp.float64)                       # (anti, parallel), fixed
-        if alpha0 is None:
-            alpha0 = 1.0 / float(cusp[0]) if float(cusp[0]) > 0 else 1.0
-        self.alpha = nnx.Param(jnp.full((2,), float(alpha0)))               # (anti, parallel)
-        self.supercell = jnp.asarray(lattice.supercell)
+        self.alpha0 = alpha0
+        self.hidden = hidden
+        self.rngs = rngs
+
+        if kind == "cusp_nn":
+            self.w = MLP(
+                in_dim = 2+3+1+1, # features: 2: cos(G12 . r), 3: cos(Gs.r), 1: distance d, 1: spin product ss
+                out_dim=1, hidden_layers=(hidden,), rngs=rngs, activation=nnx.tanh, last_init=nnx.initializers.zeros
+            )
+            self.v = MLP(
+                in_dim = y_dim, # output from message passing
+                out_dim=1, hidden_layers=(hidden,), rngs=rngs, activation=nnx.tanh, last_init=nnx.initializers.zeros
+            )
         self.G12 = jnp.asarray(lattice.G12)
         self.Gs = jnp.asarray(lattice.G)
-        if kind == "cusp_nn":
-            self.w = MLP(in_dim=2 + 3 + 2, out_dim=1, hidden_layers=(hidden,), rngs=rngs,
-                        activation=nnx.tanh, last_init=nnx.initializers.zeros)
-            self.v = MLP(in_dim=ydim, out_dim=1, hidden_layers=(hidden,), rngs=rngs,
-                        activation=nnx.tanh, last_init=nnx.initializers.zeros)
-        elif kind != "cusp":
-            raise ValueError(f"unknown jastrow kind {kind!r}")
+        if alpha0 is None:
+            alpha0 = 1/float(cusp_c[0]) if float(cusp_c[0]) > 0 else 1.0
+        self.alpha = nnx.Param(value=jnp.full((2,), float(alpha0)))
 
     def __call__(self, r, y=None):
         N = self.N
-        s = jnp.concatenate((jnp.ones(self.n_up), -jnp.ones(N - self.n_up)))
-        same = (s[:, None] * s[None, :]) > 0                                 # (N, N)
-        iu = np.triu_indices(N, k=1)
-        rp = r[:, iu[0], :] - r[:, iu[1], :]                                 # (B, P, 2), i < j
-        d = ferminet_periodic_dist(rp, self.supercell)                       # (B, P)
-        par = same[iu]
-        c = jnp.where(par, self.c[1], self.c[0])
+        s = jnp.concatenate((jnp.ones(self.n_up), -jnp.ones(N-self.n_up)), axis=-1)
+        same = (s[:, None] * s[None, :]) > 0
+        indices_unique = jnp.triu_indices(N, k=1) # from the upper triangular indices of matrix
+        relative_position = r[:, indices_unique[0], :] - r[:, indices_unique[1], :] # relative position rij=ri - rj, obtained from the previous unique indices
+        dist = jnp.sqrt(periodic_dist_square(relative_position, Gs=self.Gs))
+        par = same[indices_unique]
+        c = jnp.where(par, self.cusp_c[1], self.cusp_c[0])
         alpha = jnp.where(par, self.alpha[...][1], self.alpha[...][0])
-        logJ = jnp.sum(-(c * alpha**2) / (alpha + d), axis=-1)
+        logJ = jnp.sum(-c * alpha**2 / (alpha + dist), axis=-1)
+
         if self.kind == "cusp_nn":
-            ss = jnp.broadcast_to(jnp.where(par, 1.0, -1.0), d.shape)[..., None]
-            feats = jnp.concatenate((jnp.cos(rp @ self.G12.T), jnp.cos(rp @ self.Gs.T), d[..., None], ss), -1)
-            logJ = logJ + jnp.sum(self.w(feats)[..., 0], axis=-1)
+            ss = jnp.broadcast_to(jnp.where(par, 1, -1), dist.shape)[..., None]
+            features = jnp.concatenate(
+                (jnp.cos(relative_position @ self.G12.T), jnp.cos(relative_position @ self.Gs.T),
+                dist[..., None], ss), axis=-1
+            )
+            logJ = logJ + jnp.sum(self.w(features)[...,0], axis=-1)
             if y is not None:
-                logJ = logJ + jnp.sum(self.v(y)[..., 0], axis=-1)
+                logJ = logJ + jnp.sum(self.v(y)[...,0], axis=-1)
+
         return logJ
+
+
+
 
 ACTIVATIONS = dict(gelu=nnx.gelu, tanh=nnx.tanh, silu=nnx.silu)
 class MoireMPNN(nnx.Module):
@@ -310,7 +327,7 @@ class MPNQS(nnx.Module):
         orbital_G_radius: float = 3.0,
         orbital_envelope: str = "bare",
         activation: str = "gelu",
-        jastrow: str = "none",
+        jastrow: str = "cusp",
         jastrow_cusp: tuple | None = None,
         jastrow_alpha0: float | None = None,
         mpnn_kwargs: dict | None = None,
